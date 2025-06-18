@@ -1,0 +1,3 @@
+polygon-python-client
+pandas
+pytz
