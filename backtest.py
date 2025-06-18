@@ -7,6 +7,7 @@ import pytz
 import time
 import os
 import threading
+import configparser # Added import
 
 # --- DEPENDENCY CHECK & INSTRUCTIONS ---
 try:
@@ -24,7 +25,25 @@ except ImportError:
 
 # --- CONFIGURATION ---
 # Polygon.io free tier allows 5 API calls per minute. 60 / 5 = 12 seconds. Add a buffer.
-API_CALL_DELAY_SECONDS = 13
+API_CALL_DELAY_SECONDS = 12.2
+CONFIG_FILE = 'config.ini' # Added config file name
+
+# --- API KEY MANAGEMENT ---
+
+def save_api_key(api_key):
+    """Saves the API key to the config file."""
+    config = configparser.ConfigParser()
+    config['POLYGON'] = {'api_key': api_key}
+    with open(CONFIG_FILE, 'w') as configfile:
+        config.write(configfile)
+
+def load_api_key():
+    """Loads the API key from the config file."""
+    if not os.path.exists(CONFIG_FILE):
+        return None
+    config = configparser.ConfigParser()
+    config.read(CONFIG_FILE)
+    return config.get('POLYGON', 'api_key', fallback=None)
 
 # --- DATA PROVIDER: POLYGON.IO ---
 
@@ -36,8 +55,8 @@ def fetch_historical_data_polygon(client, ticker, interval, start_date, end_date
     """
     # Map GUI interval to Polygon API timespan and multiplier
     interval_map = {
-        '1min': ('minute', 1), '5min': ('minute', 5), '15min': ('minute', 15),
-        '30min': ('minute', 30), '60min': ('hour', 1)
+        '1min': ('minute', 1), '5min': ('minute', 5), '10min': ('minute', 10),
+        '15min': ('minute', 15), '30min': ('minute', 30), '60min': ('hour', 1)
     }
     if interval not in interval_map:
         raise ValueError(f"Unsupported interval: {interval}. Supported intervals are {list(interval_map.keys())}")
@@ -139,11 +158,21 @@ def fetch_and_save_data():
 
         # --- Validation ---
         if not api_key:
-            messagebox.showerror("API Key Required", "Polygon.io API key is required.")
-            return
+            # Try to load from config if entry is empty, though test_api_key_action should handle most direct uses
+            loaded_key = load_api_key()
+            if loaded_key:
+                api_key = loaded_key
+                root.after(0, lambda: polygon_api_key_entry.insert(0, api_key)) # Update GUI
+                root.after(0, lambda: api_key_status_label.config(text="Loaded key from config for fetch.", foreground="blue"))
+            else:
+                messagebox.showerror("API Key Required", "Polygon.io API key is required in entry or config.")
+                root.after(0, lambda: api_key_status_label.config(text="API Key is missing.", foreground="red"))
+                return
+
         is_valid, validation_msg = validate_api_key(api_key)
         if not is_valid:
             messagebox.showerror("Invalid API Key", f"API key validation failed: {validation_msg}")
+            root.after(0, lambda: api_key_status_label.config(text=f"Invalid API Key: {validation_msg}", foreground="red"))
             return
         if not ticker_symbol:
             messagebox.showerror("Ticker Required", "Please enter a ticker symbol.")
@@ -189,6 +218,9 @@ def fetch_and_save_data():
         
         # Data from Polygon is already in UTC. Create timezone-aware start/end for precise filtering.
         start_ts = pd.Timestamp(start_date, tz='UTC')
+        # end_ts should be exclusive, so data up to the end of the selected end_date.
+        # Example: if end_date is 2023-10-05, we want data up to 2023-10-05 23:59:59.999...
+        # So, using pd.Timestamp(end_date) + pd.Timedelta(days=1) is correct.
         end_ts = pd.Timestamp(end_date, tz='UTC') + pd.Timedelta(days=1)
         
         # Filter the data to the precise range.
@@ -202,8 +234,8 @@ def fetch_and_save_data():
         status_update_callback("Processing and cleaning data...")
         filtered_data = filtered_data[~filtered_data.index.duplicated(keep='first')].sort_index()
 
-        # Convert to target timezone (UTC+2) for the final output file, as per original script's requirement.
-        target_tz = pytz.FixedOffset(120)
+        # Convert to target timezone (America/Los_Angeles for PST/PDT) for the final output file.
+        target_tz = pytz.timezone('America/Los_Angeles')
         filtered_data.index = filtered_data.index.tz_convert(target_tz)
 
         default_filename = f"{ticker_symbol.replace(':', '')}_{interval_str}_backtest_{start_date_str}_to_{end_date_str}.csv"
@@ -222,6 +254,7 @@ def fetch_and_save_data():
         
         # Save the final DataFrame to CSV
         output_df.to_csv(final_filepath)
+        save_api_key(api_key) # Save working API key
         
         data_summary = (f"✅ Data successfully saved!\n\nFile: {os.path.basename(final_filepath)}\nTicker: {ticker_symbol}\n"
                         f"Interval: {interval_str}\nRows: {len(output_df):,}\nColumns: Open\n"
@@ -232,9 +265,23 @@ def fetch_and_save_data():
         
     except Exception as e:
         error_msg = str(e)
-        print(f"Full error details: {e}")
+        print(f"Full error details: {e}") # Keep this for detailed debugging
+        if isinstance(e.__cause__, BadResponse): # Check underlying cause for API errors
+            if e.__cause__.status == 401 or e.__cause__.status == 403:
+                # Update API key status label from the main thread
+                root.after(0, lambda: api_key_status_label.config(text="Invalid key (during fetch).", foreground="red"))
+                error_msg = "Invalid or unauthorized API key during data fetch. Please check your key."
+            else:
+                error_msg = f"API error during data fetch: {e.__cause__.status}"
+        elif isinstance(e, BadResponse): # Direct BadResponse (e.g. from test_api_key if not caught there)
+             if e.status == 401 or e.status == 403:
+                root.after(0, lambda: api_key_status_label.config(text="Invalid key (during fetch).", foreground="red"))
+                error_msg = "Invalid or unauthorized API key. Please check your key."
+             else:
+                error_msg = f"API error: {e.status}"
+
         messagebox.showerror("Error", f"An error occurred:\n\n{error_msg}")
-        status_update_callback("❌ Error occurred. Check inputs and console for details.")
+        status_update_callback(f"❌ Error: {error_msg[:100]}...") # Show a snippet of the error
     finally:
         # Re-enable the fetch button in the GUI thread
         root.after(0, lambda: fetch_button.config(state="normal"))
@@ -250,6 +297,36 @@ def start_fetch_thread():
     thread = threading.Thread(target=fetch_and_save_data)
     thread.daemon = True  # Allows main window to exit even if thread is running
     thread.start()
+
+# --- API Key Test Action ---
+def test_api_key_action():
+    """Tests the API key entered in the GUI."""
+    api_key = polygon_api_key_entry.get().strip()
+    if not api_key:
+        api_key_status_label.config(text="Key is empty.", foreground="red")
+        return
+
+    is_valid, validation_msg = validate_api_key(api_key)
+    if not is_valid:
+        api_key_status_label.config(text=validation_msg, foreground="red")
+        return
+
+    api_key_status_label.config(text="Testing...", foreground="blue")
+    root.update_idletasks() # Ensure label updates before blocking call
+
+    try:
+        client = RESTClient(api_key) # Ensure RESTClient is imported
+        client.get_ticker_details("AAPL") # Test call with a common ticker
+        api_key_status_label.config(text="Key is valid!", foreground="green")
+        save_api_key(api_key)
+    except BadResponse as e: # Ensure BadResponse is imported
+        if e.status == 401 or e.status == 403: # Unauthorized
+            api_key_status_label.config(text="Invalid or unauthorized key.", foreground="red")
+        else: # Other API errors
+            api_key_status_label.config(text=f"Test API error: {e.status}", foreground="red")
+    except Exception as e: # Network errors, etc.
+        # Show first 30 chars of error to avoid overly long messages
+        api_key_status_label.config(text=f"Test connection error: {str(e)[:30]}", foreground="red")
 
 # --- GUI SETUP ---
 root = tk.Tk()
@@ -298,10 +375,22 @@ ticker_entry.insert(0, "AAPL") # Default to stock example
 row_num += 1
 
 # --- API Key Entry ---
-ttk.Label(main_frame, text="Polygon.io API Key:", font=("Arial", 10, "bold")).grid(row=row_num, column=0, sticky="w")
+api_key_label = ttk.Label(main_frame, text="Polygon.io API Key:", font=("Arial", 10, "bold"))
+api_key_label.grid(row=row_num, column=0, sticky="w")
+
 polygon_api_key_entry = ttk.Entry(main_frame, width=30, show="*", font=("Arial", 10))
-polygon_api_key_entry.grid(row=row_num, column=1, columnspan=2, sticky="ew", padx=(10, 0))
+# polygon_api_key_entry.grid(row=row_num, column=1, columnspan=2, sticky="ew", padx=(10, 0)) # Old
+polygon_api_key_entry.grid(row=row_num, column=1, sticky="ew", padx=(10, 0)) # New: col 1, no columnspan
+
+test_key_button = ttk.Button(main_frame, text="Test Key", command=test_api_key_action)
+test_key_button.grid(row=row_num, column=2, sticky="e", padx=(5,0))
 row_num += 1
+
+# --- API Key Status Label ---
+api_key_status_label = ttk.Label(main_frame, text="Enter API key and test or load from config.", font=("Arial", 9))
+api_key_status_label.grid(row=row_num, column=0, columnspan=3, sticky="ew", pady=(0,10), padx=(0,0)) # Spans 3 columns now
+row_num += 1
+
 
 # --- Date Entries ---
 end_date_default = datetime.date.today()
@@ -321,7 +410,7 @@ row_num += 1
 
 # --- Interval Selection ---
 ttk.Label(main_frame, text="Time Interval:", font=("Arial", 10, "bold")).grid(row=row_num, column=0, sticky="w")
-interval_combobox = ttk.Combobox(main_frame, values=["1min", "5min", "15min", "30min", "60min"], width=27, state="readonly", font=("Arial", 10))
+interval_combobox = ttk.Combobox(main_frame, values=["1min", "5min", "10min", "15min", "30min", "60min"], width=27, state="readonly", font=("Arial", 10))
 interval_combobox.grid(row=row_num, column=1, columnspan=2, sticky="ew", padx=(10, 0))
 interval_combobox.set("30min")
 row_num += 1
@@ -363,8 +452,17 @@ root.bind('<Return>', on_enter_key)
 root.bind('<KP_Enter>', on_enter_key)
 ticker_entry.focus()
 
+# Load API key on startup
+initial_api_key = load_api_key()
+if initial_api_key:
+    polygon_api_key_entry.insert(0, initial_api_key)
+    api_key_status_label.config(text="Loaded from config. Test or use.", foreground="blue")
+else:
+    api_key_status_label.config(text="Enter key to test or use.", foreground="black")
+
+
 if __name__ == "__main__":
     print("Starting Polygon.io Data Downloader...")
     print("Make sure you have a valid Polygon.io API key and required libraries installed.")
-    print("--> pip install polygon-python-client pandas pytz")
+    print("--> pip install polygon-python-client pandas pytz configparser") # Added configparser to instructions
     root.mainloop()

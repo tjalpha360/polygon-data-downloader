@@ -6,11 +6,12 @@ A user-friendly Python GUI application to download historical stock and cryptocu
 
 - **Dual Asset Support:** Download data for both Stocks and Cryptocurrencies.
 - **User-Friendly GUI:** Simple interface built with Tkinter for easy operation.
-- **Customizable Queries:** Specify ticker, date range, and time interval (1min, 5min, 15min, 30min, 60min).
+- **Customizable Queries:** Specify ticker, date range, and time interval (1min, 5min, 10min, 15min, 30min, 60min).
 - **Rate Limit Handling:** Automatically waits between API calls to respect Polygon.io's free tier limits (5 calls/minute).
 - **Responsive Interface:** Data fetching runs in a background thread to prevent the GUI from freezing.
 - **Robust Error Handling:** Provides clear feedback and allows continuing on minor API errors.
-- **Backtest-Ready Output:** Saves a clean CSV file with a single 'Open' price column and a timezone-aware timestamp index (UTC+2).
+- **API Key Persistence:** Saves your valid Polygon.io API key locally for automatic reloading on subsequent uses.
+- **Backtest-Ready Output:** Saves a clean CSV file with a single 'Open' price column and a timezone-aware timestamp index (PST/PDT).
 
 ## Requirements
 
@@ -42,7 +43,7 @@ A user-friendly Python GUI application to download historical stock and cryptocu
     ```bash
     python backtest.py
     ```
-2.  **Enter your Polygon.io API Key.**
+2.  **Enter your Polygon.io API Key.** The key can be tested using the 'Test Key' button. A valid key will be saved locally and automatically loaded the next time you run the application.
 3.  **Select the Asset Type** (Stocks or Crypto).
 4.  **Enter the Ticker Symbol** (e.g., `AAPL` for stocks, `X:BTC-USD` for crypto).
 5.  **Set the Start and End Dates** in `YYYY-MM-DD` format.
